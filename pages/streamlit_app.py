@@ -1,70 +1,83 @@
 # streamlit_app.py
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="자산배분 회귀분석", layout="wide")
-st.title("📊 자산배분 회귀분석 대시보드")
+st.set_page_config(page_title="Yahoo Finance 자산배분 분석", layout="wide")
+st.title("📈 자산배분 회귀 분석 (Yahoo Finance 기반)")
 
-# CSV 파일 로딩
-DATA_PATH = "data003 - Copy.csv"
-try:
-    df = pd.read_csv(DATA_PATH)
-except FileNotFoundError:
-    st.error(f"❌ 파일을 찾을 수 없습니다: {DATA_PATH}")
+# 자산 리스트 (Bitcoin + 글로벌 ETF들)
+assets = {
+    "Bitcoin": "BTC-USD",
+    "S&P 500": "SPY",
+    "Gold": "GLD",
+    "US Bonds (20Y)": "TLT",
+    "MSCI EAFE": "EFA",
+    "Emerging Markets": "EEM"
+}
+
+st.sidebar.header("분석 대상 자산 설정")
+selected_assets = st.sidebar.multiselect(
+    "자산 선택 (최소 2개)",
+    list(assets.keys()),
+    default=["Bitcoin", "S&P 500", "Gold", "US Bonds (20Y)"]
+)
+
+if len(selected_assets) < 2:
+    st.warning("⚠️ 자산을 최소 2개 이상 선택해야 회귀 분석이 가능합니다.")
     st.stop()
 
-# 날짜 처리 및 인덱스 설정
-df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-df.set_index('Date', inplace=True)
+# 데이터 다운로드
+@st.cache_data
+def load_data(tickers, start="2014-01-01"):
+    data = yf.download(tickers=list(tickers.values()), start=start, interval="1mo")["Adj Close"]
+    data = data.dropna(how='all')  # 전체 결측 행 제거
+    data = data.fillna(method='ffill')  # 일부 자산 결측치 보정
+    return data
+
+data = load_data({k: assets[k] for k in selected_assets})
+monthly_returns = data.pct_change().dropna()
 
 # 연도 및 종속 변수 선택
-years = df.index.year.unique()
+years = monthly_returns.index.year.unique()
 selected_year = st.selectbox("분석할 연도 선택", sorted(years))
-dependent_var = st.selectbox("종속 자산 선택", df.columns)
+dependent_var = st.selectbox("종속 자산 선택", selected_assets)
 
-# 해당 연도 데이터 필터링
-df_year = df[df.index.year == selected_year]
+# 해당 연도 데이터 선택
+df_year = monthly_returns[monthly_returns.index.year == selected_year]
 
-# 모든 값을 숫자로 변환
-df_year = df_year.apply(pd.to_numeric, errors='coerce')
-df_year = df_year.dropna()
-
-# 데이터 존재 여부 확인
-if df_year.empty:
-    st.warning("⚠️ 선택한 연도에 유효한 데이터가 없습니다.")
-    st.stop()
-
-# 설명 변수 자동 선택
-excluded = [dependent_var, 'Tbill', 'Excess Return']
-X_cols = [col for col in df_year.columns if col not in excluded]
-X = df_year[X_cols]
-y = df_year[dependent_var]
-
-# X, y 유효성 확인
-if X.empty or y.empty:
-    st.warning("⚠️ 설명 변수(X) 또는 종속 변수(y)에 유효한 데이터가 없습니다.")
-    st.stop()
-
-# 회귀 분석 수행
+# 설명변수 및 종속변수 분리
 try:
+    y = df_year[assets[dependent_var]]
+    X_cols = [assets[a] for a in selected_assets if a != dependent_var]
+    X = df_year[X_cols]
+
+    # 결측 제거
+    data_combined = pd.concat([y, X], axis=1).dropna()
+    y = data_combined.iloc[:, 0]
+    X = data_combined.iloc[:, 1:]
+
+    if X.empty or y.empty:
+        st.warning("⚠️ 선택한 연도에 유효한 회귀 데이터가 없습니다.")
+        st.stop()
+
     X_const = sm.add_constant(X)
     model = sm.OLS(y, X_const).fit()
 
     st.subheader("📄 회귀 분석 요약")
     st.text(model.summary())
 
-    # 회귀 계수 시각화
-    st.subheader("📈 회귀 계수 시각화")
-    coef = model.params.drop('const')
+    st.subheader("📊 회귀 계수 시각화")
+    coef = model.params.drop("const")
     fig, ax = plt.subplots(figsize=(10, 6))
-    coef.plot(kind='bar', color='skyblue', ax=ax)
-    ax.set_ylabel("회귀 계수")
-    ax.set_title(f"{selected_year}년 {dependent_var} 수익률 회귀분석")
+    coef.plot(kind="bar", color="cornflowerblue", ax=ax)
+    ax.set_title(f"{selected_year}년 {dependent_var} 수익률 회귀 계수")
+    ax.set_ylabel("Beta (회귀 계수)")
     ax.grid(True)
     st.pyplot(fig)
 
 except Exception as e:
-    st.error(f"❌ 회귀 분석 중 오류가 발생했습니다:\n\n{e}")
+    st.error(f"❌ 회귀 분석 중 오류 발생:\n\n{e}")
